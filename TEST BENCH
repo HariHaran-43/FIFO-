@@ -1,0 +1,277 @@
+TEST BENCH 
+
+
+interface fifo_intf;
+  
+  logic clk,rst,wr_en,rd_en,full,empty;
+  logic [7:0] din,dout;
+  
+endinterface
+
+class transaction;
+  
+  rand logic wr_en,rd_en;
+  rand logic [7:0] din;
+  logic [7:0] dout;
+  logic full,empty,rst;
+  
+  
+endclass
+
+class generator;
+  
+  transaction trans;
+  mailbox mbx1;
+  bit done;
+  
+  function new(mailbox mbx1);
+    this.mbx1 = mbx1;
+  endfunction
+  
+  task run();
+    
+    repeat(1000) begin
+      
+      trans = new();
+      
+      void'(trans.randomize());
+      
+      mbx1.put(trans);
+      
+     // $display("[generator]w = %b R = %b din = %d",trans.wr_en,trans.rd_en,trans.din);
+      #10;
+      
+    end
+    
+    done = 1;
+    
+  endtask
+  
+endclass
+
+class driver;
+  
+  transaction trans;
+  mailbox mbx1;
+  virtual fifo_intf vif;
+  
+  function new(mailbox mbx1, virtual fifo_intf vif);
+    this.mbx1 = mbx1;
+    this.vif = vif;
+  endfunction
+  
+  task run();
+    repeat(1000) begin
+      mbx1.get(trans);
+      @(posedge vif.clk);
+      vif.wr_en <= trans.wr_en;
+      vif.rd_en <= trans.rd_en;
+      vif.din <= trans.din;
+
+      @(posedge vif.clk);
+      vif.wr_en <= 0;
+      vif.rd_en <= 0;
+      vif.din <= 0;
+      //$display("[driver]w = %b R = %b din = %d",vif.wr_en,vif.rd_en,vif.din);
+      
+    end
+    
+  endtask
+  
+endclass
+    
+  
+class monitor;
+  
+  transaction trans;
+  virtual fifo_intf vif;
+  mailbox mbx2;
+  
+  function new(mailbox mbx2, virtual fifo_intf vif);
+    this.mbx2 = mbx2;
+    this.vif = vif;
+  endfunction
+  
+  task run();
+    forever begin
+      
+      @(posedge vif.clk);
+      #1;
+      
+      if(vif.wr_en || vif.rd_en) begin
+        trans = new();
+        trans.wr_en = vif.wr_en;
+        trans.rd_en = vif.rd_en;
+        trans.rst = vif.rst;
+        trans.din = vif.din;
+        trans.dout = vif.dout;
+        trans.full = vif.full;
+        trans.empty = vif.empty;
+        mbx2.put(trans);
+        $display("[monitor]w = %b R = %b din = %d dout = %0d | full = %0b | empty = %0b " ,trans.wr_en,trans.rd_en,trans.din,trans.dout,trans.full,trans.empty);
+
+      end
+       
+      
+    end
+    
+  endtask
+  
+endclass
+  
+  
+class scoreboard;
+  
+  transaction trans;
+  mailbox mbx2;
+  bit [7:0] expected_queue[$:3];
+  bit [7:0] expected_data;
+  
+  function new(mailbox mbx2);
+    this.mbx2 = mbx2;
+  endfunction
+  
+  task run();
+    forever begin
+      mbx2.get(trans);
+
+
+//$display("[SB] wr=%0b rd=%0b full=%0b empty=%0b din=%0d dout=%0d qsize=%0d",
+         /*trans.wr_en,
+         trans.rd_en,
+         trans.full,
+         trans.empty,
+         trans.din,
+         trans.dout,
+         expected_queue.size());*/
+      
+      if(trans.wr_en && !trans.rd_en && !trans.full)
+        expected_queue.push_back(trans.din);
+      
+      else if(!trans.wr_en && trans.rd_en && !trans.full) begin
+      
+        //if(expected_queue.size() > 0) begin
+        
+          expected_data = expected_queue[0];
+          if(expected_data == trans.dout) begin
+            void'(expected_queue.pop_front());
+            $display("[Pass] Expected = %0d | Actual = %0d",expected_data, trans.dout);
+
+          end
+          
+          else
+            $display("[Fail] Expected = %0d | Actual = %0d",expected_data, trans.dout);
+          
+       
+        
+      end
+      
+      else if(trans.wr_en && trans.rd_en && !trans.full && !trans.empty) begin
+        
+        expected_queue.push_back(trans.din);
+        expected_data = expected_queue[0];
+        if(expected_data == trans.dout) begin
+          void'(expected_queue.pop_front());
+          $display("[Pass] Expected = %0d | Actual = %0d",expected_data, trans.dout);
+        end
+          
+        else
+          $display("[Fail] Expected = %0d | Actual = %0d",expected_data, trans.dout);
+      end
+      
+    end
+    
+  endtask
+  
+endclass
+      
+
+module tb_1;
+  
+  generator gen;
+  driver drv;
+  monitor mon;
+  scoreboard sb;
+  mailbox mbx1;
+  mailbox mbx2;
+  fifo_intf vif();
+  
+  fifo uut(
+    .clk(vif.clk),
+    .rst(vif.rst),
+    .wr_en(vif.wr_en),
+    .rd_en(vif.rd_en),
+    .din(vif.din),
+    .dout(vif.dout),
+    .full(vif.full),
+    .empty(vif.empty)
+  );
+  
+  always #5 vif.clk = ~vif.clk;
+
+  covergroup fifo_cg @ (posedge vif.clk);
+    overflow_cp:
+    coverpoint(vif.wr_en && vif.full);
+    
+    underflow_cp:
+    coverpoint(vif.rd_en && vif.empty);
+    
+    simultaneous_cp:
+    coverpoint(vif.wr_en && vif.rd_en);
+    
+  endgroup
+  
+  initial begin
+    vif.clk = 0;
+    vif.rst = 0;
+    #10;
+    vif.rst = 1;
+    #10;
+    vif.rst = 0;
+    
+    mbx1 = new();
+    mbx2 = new();
+    
+    gen = new(mbx1);
+    drv = new(mbx1,vif);
+    mon = new(mbx2,vif);
+    sb = new(mbx2);
+    fork
+      gen.run();
+      drv.run();
+      mon.run();
+      sb.run(); 
+    join_none
+    wait(gen.done);
+    
+    #1000
+    force vif.wr_en = 1'b0;
+    #100;
+    release vif.wr_en;
+    #10;
+    force vif.rd_en = 1;
+    #100;
+    release vif.rd_en;
+    #10;
+    force vif.dout = 8'd88;
+    #10;
+    release vif.dout;
+    #10;
+    force vif.wr_en = 1'b0;
+    force vif.rd_en = 1'b1;
+    force vif.empty = 1'b0;
+    #100;
+    release vif.wr_en;
+    release vif.rd_en;
+    release vif.empty;
+    #100;
+    force vif.wr_en = 1'b1;
+    force vif.rd_en = 1'b1;
+    
+    force vif.full = 1'b0;
+    #100;
+
+    $stop;
+  end
+  
+endmodule
